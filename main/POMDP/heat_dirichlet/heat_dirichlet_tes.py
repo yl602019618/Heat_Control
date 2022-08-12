@@ -22,3 +22,4 @@ from mpl_toolkits.mplot3d import Axes3D
 
 ax3d = Axes3D(fig)
 ax3d.plot_surface(meshgird[0],meshgird[1],np.abs(a-b))
+plt.savefig('test_dirichlet.png')

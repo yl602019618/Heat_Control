@@ -91,7 +91,7 @@ class SuperConv2d(nn.Module):
         return x
 
 class FNO2d(nn.Module):
-    def __init__(self, modes1, modes2,  width,resolution):
+    def __init__(self, modes1, modes2,  width,resolution,step):
         super(FNO2d, self).__init__()
 
         """
@@ -111,7 +111,8 @@ class FNO2d(nn.Module):
         self.modes2 = modes2
         self.width = width
         self.padding = 9 # pad the domain if input is non-periodic
-        self.fc0 = nn.Linear(12, self.width) # input channel is 3: (a(x, y), x, y)
+        self.step = step # 
+        self.fc0 = nn.Linear(self.step, self.width) # input channel is 3: (a(x, y), x, y)
 
         self.conv0 = SuperConv2d(self.width, self.width, self.modes1, self.modes2,self.resolution)
         self.conv1 = SpectralConv2d(self.width, self.width, self.modes1, self.modes2)
@@ -211,16 +212,17 @@ class Heat_forward(nn.Module):
 
     def forward(self, input):
         '''
-        input size should be (x_size, y_size , 3)
+        input size should be (batch, x_size, y_size , 3)
         input[:,:,0] is the current solution u(x,y,t)
         input[:,:,1] is the current action f(x,y,t), which is  the old action
         input[:,:,2] is the new action f(x,y,t+dt) 
         '''
-        x1 = input[:,:,0].reshape(-1)
-        f0 =  input[:,:,1].reshape(-1)
-        f1 =  input[:,:,2].reshape(-1)
+        batch = input.shape[0]
+        x1 = input[:,:,:,0].reshape(batch,-1,1)
+        f0 =  input[:,:,:,1].reshape(batch,-1,1)
+        f1 =  input[:,:,:,2].reshape(batch,-1,1)
         b = torch.matmul(self.A0,x1) + (f0/2+f1/2)*self.dt
-        out = torch.linalg.solve(self.A1, b).reshape(self.n_x,self.n_x)
+        out = torch.linalg.solve(self.A1, b).reshape(batch, self.n_x,self.n_x)
         
         '''
         Using mask to implement Dirichlet boundary condition 
@@ -229,6 +231,8 @@ class Heat_forward(nn.Module):
         mask = torch.tensor(self.mask)
 
         output  = out.masked_fill(mask,0)
+
+        
 
         
         return output

@@ -27,8 +27,8 @@ alpha = 1/16
 r = alpha*dt/dx/dx
 fdm = Heat_forward(n_x =n_x,dt = dt , alpha = alpha)
 
-
-U = torch.Tensor(np.zeros((len(x),len(y),len(t),1)))
+batch = 3
+U = torch.Tensor(np.zeros((batch,len(x),len(y),len(t),1)))
 
 node = (len(x))*(len(y))   #自由度个数
 
@@ -36,29 +36,32 @@ node = (len(x))*(len(y))   #自由度个数
 #定义初值
 X,Y = np.meshgrid(x,y)
 
-U[:,:,0,0] = torch.Tensor(init_u(X,Y))
+
+U[:,:,:,0,0] = torch.Tensor(init_u(X,Y)).unsqueeze(0).repeat([batch,1,1])
 
 
 time = 0
 
 for i in range(n_t-1):
     time = time+dt
-    f_old = torch.Tensor(source(X,Y,time-dt)).unsqueeze(-1)
-    f_new = torch.Tensor(source(X,Y,time)).unsqueeze(-1)
-    input = torch.cat((U[:,:,i,:],f_old,f_new),2)
-    U[:,:,i+1,0] = fdm(input)
+    f_old = torch.Tensor(source(X,Y,time-dt)).reshape([1,n_x,n_y,1]).repeat([batch,1,1,1])
+    f_new = torch.Tensor(source(X,Y,time)).reshape([1,n_x,n_y,1]).repeat([batch,1,1,1])
+    input = torch.cat((U[:,:,:,i,:],f_old,f_new),3)
+    U[:,:,:,i+1,0] = fdm(input)
 #print(U[:,:,-1])
 TURE_U = ture_u(X,Y,1)   #t =1 时刻真解
 
 
 
-U1 = U[:,:,-1,0].detach().numpy()
+U1 = U[2,:,:,-1,0].detach().numpy()
 from mpl_toolkits.mplot3d import Axes3D
 import matplotlib.pyplot as plt
 fig = plt.figure()
 ax3d = Axes3D(fig)
 ax3d.plot_surface(X,Y,U1)
+plt.savefig('1.png')
 
 fig = plt.figure()
 ax3d = Axes3D(fig)
 ax3d.plot_surface(X,Y,TURE_U)
+plt.savefig('2.png')

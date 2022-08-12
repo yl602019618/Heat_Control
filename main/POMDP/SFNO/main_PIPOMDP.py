@@ -12,7 +12,7 @@ from torch.utils.data import DataLoader
 
 
 class heat_eqn():
-    def _init_(self,exp_step = 1000, total_step = 10000,update_freq_model = 10 , update_freq_policy = 10, device = None):
+    def __init__(self,exp_step = 100, total_step = 10000,update_freq_model = 10 , update_freq_policy = 10, device = None):
         '''
         current_step
         current_episode
@@ -28,6 +28,7 @@ class heat_eqn():
         resolution : the dimension size of hidden state recovered by SFNO in x\y axis
         dt : match dt in fenics simulation setting
         '''
+        super(heat_eqn, self).__init__()
         self. current_step = 0
         self.current_episode = 0
         self.exp_step_num = exp_step
@@ -40,9 +41,10 @@ class heat_eqn():
         self.mode2 = 5
         self.width = 20
         self.resolution = (self.obs_dim[0]-1)*4+1
-        self.SFNO = FNO2d(self.mode1 , self.mode2,self.width, self.resolution)
+        self.n = 9 # for n_step = 5
+        self.SFNO = FNO2d(self.mode1 , self.mode2,self.width, self.resolution,self.n)
         self.dt = 0.01
-        self.heat_forward = Heat_forward(n_x =self.resolution ,dt = self.dt)
+        self.heat_forward = Heat_forward(n_x =self.resolution ,dt = self.dt, alpha =1/16)
         #self.model_A = model_A()
 
         self.env =  gym.make('Heat_d-v0')
@@ -51,12 +53,12 @@ class heat_eqn():
         self.data_real = ReplayBuffer( obs_dim = self.obs_dim[0], act_dim = self.act_dim, size = 500)
     def init_variable(self):
         self.env.reset()
-        self.optimizer = optim.Adam(self.SFNO.parameters(), lr=1e-3, weight_decay=1e-5)
+        self.optimizer = optim.Adam(self.SFNO.parameters(), lr=1e-5, weight_decay=1e-5)
         self.scheduler = lr_scheduler.StepLR(self.optimizer, step_size=50, gamma=0.998)
 
     def exp_step(self):
-        observation_new = self.env.get_data()  #get observe of step 0
-        for n in range(self.exp_step):
+        observation_new = self.env.get_value()  #get observe of step 0
+        for n in range(self.exp_step_num):
             action = self.env.action_space.sample()
             observation = torch.Tensor(self.env.get_value())
             observation1, reward, done, info = self.env.step(action)  # 用于提交动作，括号内是具体的动作
@@ -69,21 +71,29 @@ class heat_eqn():
                 self.env.reset()
                 self.episode +=1
     
-    def loss_gen(self,output, truth, beta ):
+    def loss_gen(self,output0,output1, truth, beta ,action):
         '''
         input of SFNO is the (batch_size , n_step,obs_dim,obs_dim)
-        output of SFNO is (batch_size , 2,(obs_dim-1)*r+1,(obs_dim-1)*r+1)
+        output0/1 of SFNO is (batch_size , (obs_dim-1)*r+1,(obs_dim-1)*r+1)
         truth of SFNO is  (batch_size,2,obs_dim,obs_dim) which represent the corresponding point of HR data
         beta is the fraction between data loss and physic-informed loss
         '''
         MSE_loss = nn.MSELoss()
         L1_loss=  nn.L1Loss()
-        r = (output.shape[2]-1)/(self.obs_dim[0] -1)
-        data_loss = L1_loss(output[:,:,0::r,0::r],truth)
-        step_forward = self.heat_forward(output[:,0,:,:])
-        phy_loss = MSE_loss(step_forward,output[:,1,:,:])
-        total_loss =  data_loss+ phy_loss*beta
-        return total_loss
+        #print((output0.shape[1]-1),(self.obs_dim[1]-1))
+        r = (output0.shape[1]-1)//(self.obs_dim[0] -1)
+        
+        self.data_loss = L1_loss(output0[:,0::r,0::r,0],truth[:,0,:,:])+L1_loss(output1[:,0::r,0::r,0],truth[:,1,:,:])
+        # out_with_act should be  
+        
+        out_with_act = torch.cat((output0.permute(0,3,1,2),action),dim = 1).permute(0,2,3,1)
+        #print('out_with_act shape',out_with_act.shape) #batch,3,n_x,n_x
+        step_forward = self.heat_forward(out_with_act)
+        #print('step_forward: ' , step_forward.shape)# batch, nx,ny
+        #print('step_forward: ' , output1.shape)# batch, nx,ny,1
+        self.phy_loss = MSE_loss(step_forward,output1.permute(0,3,1,2)[:,0,:,:]) 
+        self.total_loss =  self.data_loss+ self.phy_loss*beta
+        return self.total_loss
 
     def get_grid(self, shape):
         batch_size, n, size_x, size_y = shape[0], shape[1],shape[2],shape[3]
@@ -101,7 +111,11 @@ class heat_eqn():
         output should be the action function wrt grid (batch_size,n_step-1 , grid_x, grid_y)
         input type: a1+a2*x[0]+a3*x[1]+a4*x[0]*x[0]+a5*x[1]*x[1]+a6*x[0]*x[1]
         '''
-        
+        action = action.unsqueeze(-1).unsqueeze(-1).repeat([1,1,1,grid.shape[2],grid.shape[3]])
+        out = action[:,:,0,:,:]+ action[:,:,1,:,:]*grid[:,:,:,:,0]+action[:,:,2,:,:]*grid[:,:,:,:,1] \
+            + action[:,:,3,:,:]*grid[:,:,:,:,0]*grid[:,:,:,:,0]+action[:,:,4,:,:]*grid[:,:,:,:,1]*grid[:,:,:,:,1]\
+            +grid[:,:,:,:,1]*grid[:,:,:,:,0]*action[:,:,5,:,:]
+        return out
         
 
 
@@ -112,13 +126,133 @@ class heat_eqn():
 
         epoch is the number of training step
         n_step is the n_step in sampling batch
+
+        the action(t) followed the obs(t) represent act(x,y,t+dt),which is the source term of
+
+        so heat forward should be act(t-1) obs(t) act(t)
         '''
 
         self.grid = self.get_grid([batch_size,n_step-1,self.obs_dim[0],self.obs_dim[1]])
+        self.grid_fine = self.get_grid([batch_size,2,self.resolution,self.resolution])
+        print_every = 10
         for i in range(epoch):
             sample = self.data_real.sample_batch_FNO(batch_size= batch_size,start = 0 , end = self.data_real.size,n_step = n_step)
+            action = self.action_grid(sample['act'],self.grid)
+            # action is (batch_size,n_step-1 , grid_x, grid_y) 
+            #obs is 
+            obs = sample['obs'] #(batch_size,n_step ,grid_x,grid_y)
+            input = obs[:,0:1,:,:]
+            for j in range(n_step-1):
+                input = torch.cat((input,action[:,j:j+1,:,:]),dim = 1)
+                input = torch.cat((input,obs[:,j+1:j+2,:,:]),dim = 1)
+            # input (batch_size,2*n_step-1,grid_x,grid_y)
+            #print('input_shape',input[:,:-2,:,:].shape)# 10,9,10,10 in test2
+            output0 = self.SFNO(input[:,:-2,:,:].permute(0, 2, 3, 1))# batch , 1, x, y
+            #print('output0.shape',output0.shape)
+            output1 = self.SFNO(input[:,2:,:,:].permute(0, 2, 3, 1)) # batch , 1, x, y
+            #need to add grid information to compute onestep heat forward
+            # compute action of final t and t -1 in fine grid
+            action_fine = self.action_grid(sample['act'][:,-2:,:],self.grid_fine)
+            #print('action_fine shape',action_fine.shape)
+            #print(input[0,[2*n_step-4,2*n_step-2],:,:])
+            loss = self.loss_gen(output0 = output0 ,output1 = output1, truth = input[:,[2*n_step-4,2*n_step-2],:,:],beta = 100,action = action_fine)
+            #loss.backward(retain_graph=True)
+            loss.backward()
+            #nn.utils.clip_grad_value_(self.SFNO.parameters(), clip_value=1.0)
+            #self.optimizer.zero_grad()
+            self.optimizer.step()
+            self.scheduler.step()
+            if (i+1) % print_every == 0:
+                print('Epoch :%d ; Loss:%.8f;phy_loss %.8f;data_loss %.8f; '  % (i+1, self.total_loss.item(),self.phy_loss.item(),self.data_loss.item()))
+
+
+    def train_SFNO_test(self,n_step,batch_size):
+        self.grid = self.get_grid([batch_size,n_step-1,self.obs_dim[0],self.obs_dim[1]])
+        sample = self.data_real.sample_batch_FNO(batch_size= batch_size,start = 0 , end = self.data_real.size,n_step = n_step)
+        action = self.action_grid(sample['act'],self.grid)
+        print(action.shape)
+        action_new = sample['act']
+        action_new = action_new[0:1,0:1,:]
+        action_xy = self.action_grid(action_new,self.grid[0:1,0:1,:,:,:])
+        return action_xy[0,0],self.grid[1,1] , action_new[0,0]
+
+    def plot_result(self,n_step):
+        batch_size = 1
+        self.grid = self.get_grid([batch_size,n_step-1,self.obs_dim[0],self.obs_dim[1]])
+        self.grid_fine = self.get_grid([batch_size,2,self.resolution,self.resolution])
+        sample = self.data_real.sample_batch_FNO(batch_size= batch_size,start = 0 , end = self.data_real.size,n_step = n_step)
+        action = self.action_grid(sample['act'],self.grid)
+        obs = sample['obs'] #(batch_size,n_step ,grid_x,grid_y)
+        input = obs[:,0:1,:,:]
+        for j in range(n_step-1):
+                input = torch.cat((input,action[:,j:j+1,:,:]),dim = 1)
+                input = torch.cat((input,obs[:,j+1:j+2,:,:]),dim = 1)
+        output0 = self.SFNO(input[:,:-2,:,:].permute(0, 2, 3, 1))# batch , 1, x, y
+        #print('output0.shape',output0.shape)
+        output1 = self.SFNO(input[:,2:,:,:].permute(0, 2, 3, 1)) # batch , 1, x, y
+        action_fine = self.action_grid(sample['act'][:,-2:,:],self.grid_fine)
+        out_with_act = torch.cat((output0.permute(0,3,1,2),action_fine),dim = 1).permute(0,2,3,1)
+        #print('out_with_act shape',out_with_act.shape) #batch,3,n_x,n_x
+        step_forward = self.heat_forward(out_with_act)
+        r = (output0.shape[1]-1)//(self.obs_dim[0] -1)
+        '''
+        input[0,2*n_step-4,:,:]
+        output0[0,0,:,:] 
+        output0[0,0,0::r,0::r]
+        input[0,2*n_step-2,:,:]
+        output1[0,0,:,:] 
+        output1[0,0,0::r,0::r]
+        '''
+        # print LR u(t)
+        from mpl_toolkits.mplot3d import Axes3D
+        import matplotlib.pyplot as plt
+        fig = plt.figure()
+        gridx = self.grid[0,0,:,:,0].detach().numpy()
+        gridy = self.grid[0,0,:,:,1].detach().numpy()
+        gridx_f = self.grid_fine[0,0,:,:,0].detach().numpy()
+        gridy_f = self.grid_fine[0,0,:,:,1].detach().numpy()
+        ax3d = Axes3D(fig)
+        ax3d.plot_surface(gridx,gridy,input[0,2*n_step-4,:,:].detach().numpy())
+        plt.savefig('LR_true_ut.png')
+
+
+        #print HR predicted ut
+        fig = plt.figure()
+        ax3d = Axes3D(fig)
+        ax3d.plot_surface(gridx_f,gridy_f,output0[0,:,:,0].detach().numpy())
+        plt.savefig('HR_predicted_ut.png')
+
+        #print LR ut+1
+        fig = plt.figure()
+        ax3d = Axes3D(fig)
+        ax3d.plot_surface(gridx,gridy,input[0,2*n_step-2,:,:].detach().numpy())
+        plt.savefig('LR_true_utp1.png')
+
+        #print HR predicted ut+1
+        fig = plt.figure()
+        ax3d = Axes3D(fig)
+        #print('output1',output1[0,:,:,0])
+        print(gridx,gridy)
+
+        print(gridx_f,gridy_f)
+        ax3d.plot_surface(gridx_f,gridy_f,output1[0,:,:,0].detach().numpy())
+        plt.savefig('HR_predicted_utp1.png')
+
+        #print HR stepforward ut+1
+        fig = plt.figure()
+        ax3d = Axes3D(fig)
+        ax3d.plot_surface(gridx_f,gridy_f,step_forward[0,:,:].detach().numpy())
+        #print('step_forward',step_forward[0])
+        plt.savefig('HR_predicted_utp1_p.png')
+
+
+
+
+
+
             
-            action = self.action_grid(sample[action],self.grid)
+            
+
 
             
 

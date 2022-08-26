@@ -12,7 +12,7 @@ from functools import partial
 import torchvision.transforms.functional as vtF
 from timeit import default_timer
 
-#torch.manual_seed(0)
+torch.manual_seed(0)
 np.random.seed(0)
 class SpectralConv2d(nn.Module):
     def __init__(self, in_channels, out_channels, modes1, modes2):
@@ -117,7 +117,7 @@ class FNO2d(nn.Module):
         self.modes3 = modes3
         self.modes4 = modes4
         self.width = width
-        self.padding = 9 # pad the domain if input is non-periodic
+        
         self.step = step # 
         self.last_layer = 128
         self.fc0 = nn.Linear(self.step, self.width) # input channel is 3: (a(x, y), x, y)
@@ -130,8 +130,9 @@ class FNO2d(nn.Module):
         self.w1 = nn.Conv2d(self.width, self.width, 1)
         self.w2 = nn.Conv2d(self.width, self.width, 1)
         self.w3 = nn.Conv2d(self.width, self.width, 1)
-        self.ln1 = nn.LayerNorm([self.resolution,self.resolution,self.last_layer])
-
+        #self.ln1 = nn.LayerNorm([self.resolution,self.resolution,self.last_layer])
+        self.bn0 = nn.BatchNorm2d(self.width)
+        self.bn1 = nn.BatchNorm2d(self.width)
         self.fc1 = nn.Linear(self.width, self.last_layer)
         
         self.fc2 = nn.Linear(self.last_layer, 1)
@@ -142,6 +143,7 @@ class FNO2d(nn.Module):
         x = torch.cat((x, grid), dim=-1)
         x = self.fc0(x)
         x = x.permute(0, 3, 1, 2)
+        x = self.bn0(x)
         # x = F.pad(x, [0,self.padding, 0,self.padding])
 
         x1 = self.conv0(x)
@@ -166,12 +168,10 @@ class FNO2d(nn.Module):
         x2 = self.w3(x)
         x = x1 + x2
 
-        
+        x = self.bn1(x)
         x = x.permute(0, 2, 3, 1)
         x = self.fc1(x)
-        
-        x = F.gelu(x)
-        x = self.ln1(x)
+        x = torch.sin(x)
         x = self.fc2(x)
         
         return x
